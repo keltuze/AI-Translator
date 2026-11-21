@@ -1,2 +1,10 @@
-# AI-Translator
-AI Translator Control Center — Universal real-time AI &amp; Google translator for Discord (RU / EN / CN) with local Qwen 2.5 7B support.
+# AI Translator Control Center
+
+Universal real-time translator for Discord chat (RU / EN / CN).
+
+## Features
+- Real-time two-way translation for Discord.
+- Local LLM mode powered by Qwen 2.5 7B with GPU acceleration.
+- Google Translate mode (instant, no GPU needed).
+- One-click plugin installer and uninstaller.
+- In-app automatic updates directly from GitHub releases.
