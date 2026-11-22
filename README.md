@@ -31,6 +31,7 @@
 
 ## ⚡ Highlights
 
+- 📝 **Quick Translate Flyout Panel**: Convenient slide-out sidebar for on-the-fly text translation, auto-language detection, one-click copy, and automatic debounced auto-translate.
 - 🎮 **Two-Way Live Translation**: Incoming chat messages are translated in-place; messages you send are automatically translated to the target channel language upon pressing Enter.
 - 🧠 **Smart Local AI (Qwen 2.5 7B Instruct)**: High-speed GPU-accelerated local neural translation with gaming slang, gamer vocabulary, idiom adaptation, and tag protection.
 - ⚡ **Google Translate Mode**: Lightweight zero-VRAM mode requiring no local server or model download.
