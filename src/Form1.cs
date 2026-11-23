@@ -6,6 +6,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Net.Http;
 using System.Reflection;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -17,10 +18,17 @@ namespace control_center;
 public partial class Form1 : Form
 {
     private const string HealthUrl = "http://127.0.0.1:11434/health";
-    private const string ModelHfUrl = "https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf";
-    private const string ModelFilename = "qwen2.5-7b-instruct-q4_k_m.gguf";
-    private const long ExpectedModelBytes = 4683074240L;
-    public const string AppVersion = "v1.0.0";
+    private const string SmartModelUrl = "https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf";
+    private const string SmartModelFilename = "qwen2.5-7b-instruct-q4_k_m.gguf";
+    private const long SmartModelBytes = 4683074240L;
+
+    private const string LightModelUrl = "https://huggingface.co/IndexTeam/Index-Translate-2B-GGUF/resolve/main/Index-Translate-2B.Q8_0.gguf";
+    private const string LightModelFilename = "Index-Translate-2B.Q8_0.gguf";
+    private const long LightModelBytes = 2076674560L;
+
+    private const string ModelFilename = SmartModelFilename;
+    private const long ExpectedModelBytes = SmartModelBytes;
+    public const string AppVersion = "v1.1.3";
     public const string GitHubRepo = "keltuze/AI-Translator";
 
     private readonly string _baseDir;
@@ -43,6 +51,9 @@ public partial class Form1 : Form
     private Button _btnLangEn = null!;
     private Button _btnLangCn = null!;
     private Button _btnCheckUpdate = null!;
+    private ProgressBar _pbAppUpdate = null!;
+    private CancellationTokenSource? _updateCts = null;
+    private bool _isUpdatingApp = false;
 
     // UI Controls
     private Label _lblHeaderStatus = null!;
@@ -59,6 +70,8 @@ public partial class Form1 : Form
     private ProgressBar _pbDownload = null!;
     private Label _lblDownloadProgress = null!;
     private Button _btnDownloadModel = null!;
+    private Button _btnDownloadLight = null!;
+    private Button _btnQuickSwitch = null!;
     private Button _btnBrowseModel = null!;
     private Button _btnCancelDownload = null!;
     private Button _btnOpenFolder = null!;
@@ -70,8 +83,40 @@ public partial class Form1 : Form
     private Button _btnExit = null!;
     private Label _lblAuthorFooter = null!;
     private LinkLabel _lnkBoosty = null!;
+    private Label _lblVencordThanks = null!;
+    private LinkLabel _lnkVencord = null!;
+    private Label _lblRepoFooter = null!;
+    private LinkLabel _lnkRepo = null!;
     private Label _lblNotification = null!;
     private System.Windows.Forms.Timer _notificationTimer = null!;
+
+    // Quick Translate Side Panel
+    private bool _isSidePanelOpen = false;
+    private const int BaseFormWidth = 780;
+    private const int SidePanelWidth = 380;
+    private int _savedFormLeft = -1;
+    private CancellationTokenSource? _quickTransCancelSource;
+
+    private Button _btnToggleSidePanel = null!;
+    private Panel _pnlSideTranslator = null!;
+    private Label _lblSideTitle = null!;
+    private Button _btnCloseSide = null!;
+    private ComboBox _cbSourceLanguage = null!;
+    private Button _btnSidePaste = null!;
+    private Button _btnSideClear = null!;
+    private TextBox _txtSideInput = null!;
+    private Button _btnSideTranslate = null!;
+    private Button _btnAutoTranslate = null!;
+    private bool _isAutoTranslateEnabled = false;
+    private string _lastTranslatedText = "";
+    private System.Windows.Forms.Timer? _autoTranslateDebounceTimer;
+    private Label _lblSideStatus = null!;
+    private Label _lblTargetLang = null!;
+    private ComboBox _cbTargetLanguage = null!;
+    private Button _btnSwapLanguages = null!;
+    private Button _btnSideCopy = null!;
+    private TextBox _txtSideOutput = null!;
+    private Label _lblSideHint = null!;
 
     public Form1()
     {
@@ -236,6 +281,12 @@ public partial class Form1 : Form
         Activate();
         TopMost = false;
         Program.SetForegroundWindow(Handle);
+        try
+        {
+            LoadConfig();
+            UpdateModelStatus();
+        }
+        catch { }
     }
 
     private void HideWindow()
@@ -256,6 +307,7 @@ public partial class Form1 : Form
     private void FullExit()
     {
         _isExiting = true;
+        _updateCts?.Cancel();
         _curlDownloadProcess?.Kill();
         Close();
         Application.Exit();
@@ -328,8 +380,8 @@ public partial class Form1 : Form
     private void BuildModernUi()
     {
         Text = "AI Translator Control Center";
-        Size = new Size(780, 725);
-        MinimumSize = new Size(760, 700);
+        Size = new Size(780, 765);
+        MinimumSize = new Size(760, 740);
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = Color.FromArgb(28, 29, 33);
         ForeColor = Color.White;
@@ -350,8 +402,10 @@ public partial class Form1 : Form
         mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 114)); // Discord card
         mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 135)); // Model card
         mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 160)); // Usage memo
-        mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 68));  // Bottom bar
+        mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 108)); // Bottom bar
+        CreateSideTranslatorPanel();
         Controls.Add(mainPanel);
+        Controls.Add(_pnlSideTranslator);
 
         // 1. Header
         var headerPanel = new Panel { Dock = DockStyle.Fill };
@@ -367,8 +421,8 @@ public partial class Form1 : Form
         // Language Buttons: [ RU ] [ EN ] [ CN ]
         var pnlLang = new FlowLayoutPanel
         {
-            Location = new Point(185, 8),
-            Size = new Size(165, 32),
+            Location = new Point(160, 8),
+            Size = new Size(138, 32),
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = false,
             Margin = Padding.Empty,
@@ -395,12 +449,34 @@ public partial class Form1 : Form
             BackColor = Color.FromArgb(55, 60, 68),
             ForeColor = Color.FromArgb(220, 225, 235),
             FlatStyle = FlatStyle.Flat,
-            Size = new Size(165, 32),
-            Location = new Point(360, 8),
+            Size = new Size(122, 28),
+            Location = new Point(305, 6),
             Cursor = Cursors.Hand
         };
         _btnCheckUpdate.FlatAppearance.BorderSize = 0;
         _btnCheckUpdate.Click += (s, e) => CheckForUpdates(isManualClick: true);
+
+        _pbAppUpdate = new ProgressBar
+        {
+            Location = new Point(305, 36),
+            Size = new Size(122, 4),
+            Style = ProgressBarStyle.Continuous,
+            Visible = false
+        };
+
+        _btnToggleSidePanel = new Button
+        {
+            Text = "◀ Быстрый перевод",
+            Font = new Font("Segoe UI", 8.8f, FontStyle.Bold),
+            BackColor = Color.FromArgb(55, 60, 68),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Size = new Size(155, 28),
+            Location = new Point(434, 6),
+            Cursor = Cursors.Hand
+        };
+        _btnToggleSidePanel.FlatAppearance.BorderSize = 0;
+        _btnToggleSidePanel.Click += (s, e) => ToggleSidePanel();
 
         _lblHeaderStatus = new Label
         {
@@ -410,10 +486,12 @@ public partial class Form1 : Form
             AutoSize = false,
             TextAlign = ContentAlignment.MiddleRight,
             Dock = DockStyle.Right,
-            Width = 200
+            Width = 145
         };
         headerPanel.Controls.Add(_lblHeaderStatus);
+        headerPanel.Controls.Add(_btnToggleSidePanel);
         headerPanel.Controls.Add(_btnCheckUpdate);
+        headerPanel.Controls.Add(_pbAppUpdate);
         headerPanel.Controls.Add(pnlLang);
         headerPanel.Controls.Add(lblTitle);
         mainPanel.Controls.Add(headerPanel, 0, 0);
@@ -436,7 +514,7 @@ public partial class Form1 : Form
 
         _lblServerHint = new Label
         {
-            Text = "Модель: Qwen 2.5 7B Instruct в видеопамяти\nПеред запуском тяжелых 3D-игр нажмите «Остановить», чтобы освободить 5 ГБ VRAM.",
+            Text = "Локальная модель в видеопамяти\nПеред запуском тяжелых 3D-игр нажмите «Остановить», чтобы освободить VRAM.",
             Font = new Font("Segoe UI", 8.8f),
             ForeColor = Color.FromArgb(180, 185, 195),
             Location = new Point(236, 14),
@@ -515,7 +593,7 @@ public partial class Form1 : Form
         var pnlModel = CreateCardPanel();
         _lblModelTitle = new Label
         {
-            Text = "2. Локальная нейросеть (Qwen 2.5 7B ~4.68 ГБ)",
+            Text = "2. Локальная нейросеть (GGUF / любая модель)",
             Font = new Font("Segoe UI", 11f, FontStyle.Bold),
             ForeColor = Color.White,
             Location = new Point(14, 10),
@@ -559,17 +637,46 @@ public partial class Form1 : Form
 
         _btnDownloadModel = new Button
         {
-            Text = "📥 Скачать модель с Hugging Face",
+            Text = "🧠 1. Умная (Qwen 7B ~4.7 ГБ)",
             Font = new Font("Segoe UI", 9.2f, FontStyle.Bold),
             BackColor = Color.FromArgb(59, 130, 246),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
-            Size = new Size(275, 36),
+            Size = new Size(260, 36),
             Location = new Point(14, 76),
             Cursor = Cursors.Hand
         };
         _btnDownloadModel.FlatAppearance.BorderSize = 0;
-        _btnDownloadModel.Click += (s, e) => StartDownload();
+        _btnDownloadModel.Click += (s, e) => StartDownload(false);
+
+        _btnDownloadLight = new Button
+        {
+            Text = "⚡ 2. Легкая (Index 2B ~2.0 ГБ)",
+            Font = new Font("Segoe UI", 9.2f, FontStyle.Bold),
+            BackColor = Color.FromArgb(16, 185, 129),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Size = new Size(260, 36),
+            Location = new Point(284, 76),
+            Cursor = Cursors.Hand
+        };
+        _btnDownloadLight.FlatAppearance.BorderSize = 0;
+        _btnDownloadLight.Click += (s, e) => StartDownload(true);
+
+        _btnQuickSwitch = new Button
+        {
+            Text = "⚡ Переключить модель",
+            Font = new Font("Segoe UI", 9f, FontStyle.Bold),
+            BackColor = Color.FromArgb(139, 92, 246),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Size = new Size(220, 36),
+            Location = new Point(14, 76),
+            Cursor = Cursors.Hand,
+            Visible = false
+        };
+        _btnQuickSwitch.FlatAppearance.BorderSize = 0;
+        _btnQuickSwitch.Click += (s, e) => ToggleOfficialModel();
 
         _btnBrowseModel = new Button
         {
@@ -635,6 +742,8 @@ public partial class Form1 : Form
         pnlModel.Controls.Add(_pbDownload);
         pnlModel.Controls.Add(_lblDownloadProgress);
         pnlModel.Controls.Add(_btnDownloadModel);
+        pnlModel.Controls.Add(_btnDownloadLight);
+        pnlModel.Controls.Add(_btnQuickSwitch);
         pnlModel.Controls.Add(_btnBrowseModel);
         pnlModel.Controls.Add(_btnOpenFolder);
         pnlModel.Controls.Add(_btnDeleteModel);
@@ -766,11 +875,107 @@ public partial class Form1 : Form
         pnlCredits.Controls.Add(_lblAuthorFooter);
         pnlCredits.Controls.Add(_lnkBoosty);
 
+        var pnlVencordCredits = new FlowLayoutPanel
+        {
+            Location = new Point(0, 64),
+            Size = new Size(740, 20),
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            AutoSize = true,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty
+        };
+
+        _lblVencordThanks = new Label
+        {
+            Text = "Благодарность: интеграция работает на базе ",
+            Font = new Font("Segoe UI", 8.2f),
+            ForeColor = Color.FromArgb(140, 145, 155),
+            AutoSize = true,
+            Margin = new Padding(0, 1, 0, 0)
+        };
+
+        _lnkVencord = new LinkLabel
+        {
+            Text = "Vencord (github.com/Vendicated/Vencord)",
+            Font = new Font("Segoe UI", 8.2f),
+            LinkColor = Color.FromArgb(96, 165, 250),
+            ActiveLinkColor = Color.FromArgb(147, 197, 253),
+            VisitedLinkColor = Color.FromArgb(96, 165, 250),
+            AutoSize = true,
+            Margin = new Padding(0, 1, 0, 0),
+            Cursor = Cursors.Hand
+        };
+        _lnkVencord.LinkClicked += (s, e) =>
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "https://github.com/Vendicated/Vencord",
+                    UseShellExecute = true
+                });
+            }
+            catch { }
+        };
+
+        pnlVencordCredits.Controls.Add(_lblVencordThanks);
+        pnlVencordCredits.Controls.Add(_lnkVencord);
+
+        var pnlRepoCredits = new FlowLayoutPanel
+        {
+            Location = new Point(0, 82),
+            Size = new Size(740, 20),
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            AutoSize = true,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty
+        };
+
+        _lblRepoFooter = new Label
+        {
+            Text = "Проект на GitHub (скачать свежую версию): ",
+            Font = new Font("Segoe UI", 8.2f),
+            ForeColor = Color.FromArgb(140, 145, 155),
+            AutoSize = true,
+            Margin = new Padding(0, 1, 0, 0)
+        };
+
+        _lnkRepo = new LinkLabel
+        {
+            Text = "github.com/keltuze/AI-Translator",
+            Font = new Font("Segoe UI", 8.2f),
+            LinkColor = Color.FromArgb(96, 165, 250),
+            ActiveLinkColor = Color.FromArgb(147, 197, 253),
+            VisitedLinkColor = Color.FromArgb(96, 165, 250),
+            AutoSize = true,
+            Margin = new Padding(0, 1, 0, 0),
+            Cursor = Cursors.Hand
+        };
+        _lnkRepo.LinkClicked += (s, e) =>
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "https://github.com/keltuze/AI-Translator",
+                    UseShellExecute = true
+                });
+            }
+            catch { }
+        };
+
+        pnlRepoCredits.Controls.Add(_lblRepoFooter);
+        pnlRepoCredits.Controls.Add(_lnkRepo);
+
         bottomPanel.Controls.Add(_cbAutostart);
         bottomPanel.Controls.Add(_btnMinimize);
         bottomPanel.Controls.Add(_btnExit);
         bottomPanel.Controls.Add(_lblNotification);
         bottomPanel.Controls.Add(pnlCredits);
+        bottomPanel.Controls.Add(pnlVencordCredits);
+        bottomPanel.Controls.Add(pnlRepoCredits);
         mainPanel.Controls.Add(bottomPanel, 0, 5);
 
         ApplyLanguage();
@@ -782,10 +987,10 @@ public partial class Form1 : Form
         {
             Text = text,
             Font = new Font("Segoe UI", 8.2f, FontStyle.Bold),
-            Size = new Size(50, 26),
+            Size = new Size(42, 26),
             FlatStyle = FlatStyle.Flat,
             Cursor = Cursors.Hand,
-            Margin = new Padding(0, 0, 5, 0)
+            Margin = new Padding(0, 0, 4, 0)
         };
         btn.FlatAppearance.BorderSize = 0;
         return btn;
@@ -796,6 +1001,48 @@ public partial class Form1 : Form
         _currentLang = lang;
         ApplyLanguage();
         SaveConfig();
+        SyncVencordLanguage();
+    }
+
+    private void SyncVencordLanguage()
+    {
+        try
+        {
+            string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            string settingsJson = Path.Combine(appData, "Vencord", "settings", "settings.json");
+            if (File.Exists(settingsJson))
+            {
+                var root = JsonNode.Parse(File.ReadAllText(settingsJson))?.AsObject();
+                if (root != null && root["plugins"] is JsonObject plugins && plugins["Translate"] is JsonObject tr)
+                {
+                    tr["uiLanguage"] = _currentLang;
+                    File.WriteAllText(settingsJson, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+                }
+            }
+
+            // Keep Vencord renderer.js synchronized with the latest built-in version
+            string vcDist = Path.Combine(appData, "Vencord", "dist");
+            if (Directory.Exists(vcDist))
+            {
+                var asm = Assembly.GetExecutingAssembly();
+                using var stream = asm.GetManifestResourceStream("control_center.vencord.zip");
+                if (stream != null)
+                {
+                    using var archive = new ZipArchive(stream);
+                    var entry = archive.GetEntry("dist/renderer.js");
+                    if (entry != null)
+                    {
+                        string targetRenderer = Path.Combine(vcDist, "renderer.js");
+                        var fi = new FileInfo(targetRenderer);
+                        if (!fi.Exists || fi.Length != entry.Length)
+                        {
+                            entry.ExtractToFile(targetRenderer, true);
+                        }
+                    }
+                }
+            }
+        }
+        catch { }
     }
 
     private void ApplyLanguage()
@@ -808,7 +1055,7 @@ public partial class Form1 : Form
         UpdateLangBtnStyle(_btnLangEn, _currentLang == "en");
         UpdateLangBtnStyle(_btnLangCn, _currentLang == "zh");
 
-        if (_btnCheckUpdate != null && !_btnCheckUpdate.Text.Contains("!"))
+        if (_btnCheckUpdate != null && !_isUpdatingApp && !_btnCheckUpdate.Text.Contains("!"))
         {
             _btnCheckUpdate.Text = ru ? $"⚡ Обновить ({AppVersion})" :
                                    zh ? $"⚡ 检查更新 ({AppVersion})" :
@@ -836,12 +1083,6 @@ public partial class Form1 : Form
             (ru ? "⏹ Остановить сервер" : zh ? "⏹ 停止服务器" : "⏹ Stop Server") :
             (ru ? "▶ Запустить сервер" : zh ? "▶ 启动服务器" : "▶ Start Server");
 
-        _lblServerHint.Text = ru ? 
-            "Модель: Qwen 2.5 7B Instruct в видеопамяти\nПеред запуском тяжелых 3D-игр нажмите «Остановить», чтобы освободить 5 ГБ VRAM." :
-            zh ?
-            "模型: Qwen 2.5 7B Instruct 载入显存\n在启动大型 3D 游戏前，点击“停止”可释放 5 GB 显存。" :
-            "Model: Qwen 2.5 7B Instruct in VRAM\nBefore launching heavy 3D games, click 'Stop' to release 5 GB VRAM.";
-
         // Discord card
         _lblDiscordTitle.Text = ru ? "1. Интеграция с Discord (плагин Vencord)" :
                                zh ? "1. Discord 整合 (Vencord 插件)" :
@@ -854,17 +1095,13 @@ public partial class Form1 : Form
         UpdateDiscordStatus();
 
         // Model card
-        _lblModelTitle.Text = ru ? "2. Локальная нейросеть (Qwen 2.5 7B ~4.68 ГБ)" :
-                             zh ? "2. 本地神经网络 (Qwen 2.5 7B ~4.68 GB)" :
-                                  "2. Local AI Neural Model (Qwen 2.5 7B ~4.68 GB)";
+        _btnDownloadModel.Text = ru ? "📥 Скачать базовую модель (Qwen 2.5 7B)" :
+                                zh ? "📥 下载推荐模型 (Qwen 2.5 7B)" :
+                                     "📥 Download Default Model (Qwen 2.5 7B)";
 
-        _btnDownloadModel.Text = ru ? "📥 Скачать модель с Hugging Face" :
-                                zh ? "📥 从 Hugging Face 下载模型" :
-                                     "📥 Download Model from Hugging Face";
-
-        _btnBrowseModel.Text = ru ? "📁 Указать файл на диске" :
-                              zh ? "📁 选择本地文件" :
-                                   "📁 Browse Local File";
+        _btnBrowseModel.Text = ru ? "📁 Указать свой .gguf файл" :
+                              zh ? "📁 选择本地 .gguf 文件" :
+                                   "📁 Select .gguf file";
 
         _btnCancelDownload.Text = ru ? "⏹ Приостановить" :
                                  zh ? "⏹ 暂停" :
@@ -915,6 +1152,16 @@ public partial class Form1 : Form
         _lnkBoosty.Text = ru ? "Отблагодарить: boosty.to/keltuze" :
                          zh ? "赞助支持: boosty.to/keltuze" :
                               "Support: boosty.to/keltuze";
+
+        _lblVencordThanks.Text = ru ? "Благодарность: интеграция работает на базе " :
+                                 zh ? "特别致谢: Discord 整合基于开源项目 " :
+                                      "Special thanks: Discord integration built on ";
+
+        _lblRepoFooter.Text = ru ? "Проект на GitHub (скачать свежую версию): " :
+                              zh ? "GitHub 开源主页 (下载最新版本): " :
+                                   "GitHub Project (download latest version): ";
+
+        UpdateSidePanelTexts();
 
         // Tray menu
         _menuItemShow.Text = ru ? "🌐 Панель управления" : zh ? "🌐 控制面板" : "🌐 Control Panel";
@@ -1373,9 +1620,9 @@ public partial class Form1 : Form
                 else if (_currentLang == "zh")
                 {
                     tr["receivedInput"] = "auto";
-                    tr["receivedOutput"] = "zh";
-                    tr["sentInput"] = "zh";
-                    tr["sentOutput"] = "en";
+                    tr["receivedOutput"] = "zh-CN";
+                    tr["sentInput"] = "zh-CN";
+                    tr["sentOutput"] = "ru";
                     tr["uiLanguage"] = "zh";
                 }
                 else
@@ -1546,67 +1793,168 @@ public partial class Form1 : Form
         return defaultPath;
     }
 
+    private void ToggleOfficialModel()
+    {
+        string current = Path.GetFileName(GetCurrentModelPath());
+        string targetFile = current.Equals(LightModelFilename, StringComparison.OrdinalIgnoreCase) 
+            ? SmartModelFilename 
+            : LightModelFilename;
+
+        string targetPath = Path.Combine(_baseDir, "models", targetFile);
+        if (File.Exists(targetPath))
+        {
+            SaveCustomModelPath(targetPath);
+            UpdateModelStatus();
+
+            bool ru = _currentLang == "ru";
+            bool zh = _currentLang == "zh";
+
+            if (_isServerHealthy)
+            {
+                ShowNotification(ru ? "Перезапуск сервера с выбранной моделью..." :
+                                 zh ? "正在切换模型并重启服务..." :
+                                      "Switching model and restarting server...");
+                StopServer();
+                Thread.Sleep(800);
+                StartServer();
+            }
+            else
+            {
+                ShowNotification(ru ? $"Выбрана модель: {targetFile}" :
+                                 zh ? $"已选择模型: {targetFile}" :
+                                      $"Selected model: {targetFile}");
+            }
+        }
+    }
+
     private void UpdateModelStatus()
     {
         string path = GetCurrentModelPath();
         bool ru = _currentLang == "ru";
         bool zh = _currentLang == "zh";
 
+        string fileName = Path.GetFileName(path);
+        if (string.IsNullOrEmpty(fileName)) fileName = SmartModelFilename;
+
         _lblModelPath.Text = (ru ? "Файл: " : zh ? "文件: " : "File: ") + path;
 
-        if (File.Exists(path) && new FileInfo(path).Length > 100 * 1024 * 1024)
+        string smartPath = Path.Combine(_baseDir, "models", SmartModelFilename);
+        string lightPath = Path.Combine(_baseDir, "models", LightModelFilename);
+
+        bool smartExists = File.Exists(smartPath) && new FileInfo(smartPath).Length > 50 * 1024 * 1024;
+        bool lightExists = File.Exists(lightPath) && new FileInfo(lightPath).Length > 50 * 1024 * 1024;
+
+        if (File.Exists(path) && new FileInfo(path).Length > 50 * 1024 * 1024)
         {
             var info = new FileInfo(path);
             double gb = info.Length / (1024.0 * 1024.0 * 1024.0);
+
+            _lblModelTitle.Text = ru ? $"2. Локальная нейросеть ({fileName})" :
+                                  zh ? $"2. 本地大模型 ({fileName})" :
+                                       $"2. Local AI Model ({fileName})";
+
+            _lblServerHint.Text = ru ? 
+                $"Модель: {fileName} в видеопамяти\nПеред запуском тяжелых 3D-игр нажмите «Остановить», чтобы освободить {Math.Ceiling(gb):F0} ГБ VRAM." :
+                zh ?
+                $"模型: {fileName} 载入显存\n在启动大型 3D 游戏前，点击“停止”可释放 {Math.Ceiling(gb):F0} GB 显存。" :
+                $"Model: {fileName} in VRAM\nBefore launching heavy 3D games, click 'Stop' to release {Math.Ceiling(gb):F0} GB VRAM.";
+
             _lblModelStatus.Text = ru ? $"🟢 Готова ({gb:F2} ГБ)" :
                                    zh ? $"🟢 就绪 ({gb:F2} GB)" :
                                         $"🟢 Ready ({gb:F2} GB)";
             _lblModelStatus.ForeColor = Color.FromArgb(34, 197, 94);
 
-            _btnDownloadModel.Visible = false;
-
-            _btnOpenFolder.Text = ru ? "📂 Открыть папку" : zh ? "📂 打开文件夹" : "📂 Open Folder";
-            _btnOpenFolder.Location = new Point(14, 76);
-            _btnOpenFolder.Size = new Size(215, 36);
+            _btnOpenFolder.Text = ru ? "📂 Папка" : zh ? "📂 文件夹" : "📂 Folder";
+            _btnOpenFolder.Location = new Point(244, 76);
+            _btnOpenFolder.Size = new Size(130, 36);
             _btnOpenFolder.Visible = true;
 
-            _btnBrowseModel.Text = ru ? "📁 Сменить файл" : zh ? "📁 更改文件" : "📁 Change File";
-            _btnBrowseModel.Location = new Point(245, 76);
-            _btnBrowseModel.Size = new Size(215, 36);
+            _btnBrowseModel.Text = ru ? "📁 Свой .gguf" : zh ? "📁 更改文件" : "📁 Browse";
+            _btnBrowseModel.Location = new Point(384, 76);
+            _btnBrowseModel.Size = new Size(140, 36);
             _btnBrowseModel.Visible = true;
 
-            _btnDeleteModel.Text = ru ? $"🗑️ Удалить модель ({gb:F2} ГБ)" :
-                                  zh ? $"🗑️ 删除模型 ({gb:F2} GB)" :
-                                       $"🗑️ Delete Model ({gb:F2} GB)";
-            _btnDeleteModel.Location = new Point(476, 76);
-            _btnDeleteModel.Size = new Size(229, 36);
+            _btnDeleteModel.Text = ru ? $"🗑️ Удалить ({gb:F2} ГБ)" :
+                                  zh ? $"🗑️ 删除 ({gb:F2} GB)" :
+                                       $"🗑️ Delete ({gb:F2} GB)";
+            _btnDeleteModel.Location = new Point(534, 76);
+            _btnDeleteModel.Size = new Size(170, 36);
             _btnDeleteModel.Visible = true;
+
+            if (smartExists && lightExists)
+            {
+                bool isActiveLight = fileName.Equals(LightModelFilename, StringComparison.OrdinalIgnoreCase);
+                _btnQuickSwitch.Text = isActiveLight ?
+                    (ru ? "🧠 Включить Qwen 7B" : zh ? "🧠 切换至 Qwen 7B" : "🧠 Switch to Qwen 7B") :
+                    (ru ? "⚡ Включить Index 2B" : zh ? "⚡ 切换至 Index 2B" : "⚡ Switch to Index 2B");
+                _btnQuickSwitch.Location = new Point(14, 76);
+                _btnQuickSwitch.Size = new Size(220, 36);
+                _btnQuickSwitch.Visible = true;
+                _btnDownloadModel.Visible = false;
+                _btnDownloadLight.Visible = false;
+            }
+            else if (!lightExists)
+            {
+                _btnDownloadLight.Text = ru ? "⚡ Скачать легкую (2 ГБ)" : zh ? "⚡ 下载轻量模型 (2 GB)" : "⚡ Download Light (2 GB)";
+                _btnDownloadLight.Location = new Point(14, 76);
+                _btnDownloadLight.Size = new Size(220, 36);
+                _btnDownloadLight.Visible = true;
+                _btnDownloadModel.Visible = false;
+                _btnQuickSwitch.Visible = false;
+            }
+            else if (!smartExists)
+            {
+                _btnDownloadModel.Text = ru ? "🧠 Скачать умную (4.7 ГБ)" : zh ? "🧠 下载聪明大模型 (4.7 GB)" : "🧠 Download Smart (4.7 GB)";
+                _btnDownloadModel.Location = new Point(14, 76);
+                _btnDownloadModel.Size = new Size(220, 36);
+                _btnDownloadModel.Visible = true;
+                _btnDownloadLight.Visible = false;
+                _btnQuickSwitch.Visible = false;
+            }
+            else
+            {
+                _btnDownloadModel.Visible = false;
+                _btnDownloadLight.Visible = false;
+                _btnQuickSwitch.Visible = false;
+            }
         }
         else
         {
+            _lblModelTitle.Text = ru ? "2. Локальная нейросеть (выберите модель для скачивания)" :
+                                  zh ? "2. 本地大模型 (请选择要下载的模型)" :
+                                       "2. Local AI Model (select model to download)";
+
+            _lblServerHint.Text = ru ? 
+                "Модель не загружена в видеопамять\nВыберите Умную (для мощных ПК) или Легкую (для ноутбуков/слабых карт)." :
+                zh ?
+                "模型未载入显存\n请选择聪明大模型 (推荐) 或游戏轻量模型 (低显存)。" :
+                "Model not loaded in VRAM\nSelect Smart Model (recommended) or Light Gaming (low VRAM).";
+
             _lblModelStatus.Text = ru ? "🔴 Не скачана" : zh ? "🔴 未下载" : "🔴 Not downloaded";
             _lblModelStatus.ForeColor = Color.FromArgb(239, 68, 68);
 
-            _btnDownloadModel.Text = ru ? "📥 Скачать модель с Hugging Face" :
-                                    zh ? "📥 从 Hugging Face 下载模型" :
-                                         "📥 Download Model from Hugging Face";
+            _btnDownloadModel.Text = ru ? "🧠 1. Умная (Qwen 7B ~4.7 ГБ)" :
+                                     zh ? "🧠 1. 聪明模型 (Qwen 7B ~4.7 GB)" :
+                                          "🧠 1. Smart (Qwen 7B ~4.7 GB)";
             _btnDownloadModel.Location = new Point(14, 76);
-            _btnDownloadModel.Size = new Size(275, 36);
+            _btnDownloadModel.Size = new Size(260, 36);
             _btnDownloadModel.Visible = true;
 
-            _btnBrowseModel.Text = ru ? "📁 Указать файл на диске" :
-                                  zh ? "📁 选择本地文件" :
-                                       "📁 Browse Local File";
-            _btnBrowseModel.Location = new Point(304, 76);
-            _btnBrowseModel.Size = new Size(200, 36);
+            _btnDownloadLight.Text = ru ? "⚡ 2. Легкая (Index 2B ~2.0 ГБ)" :
+                                     zh ? "⚡ 2. 游戏轻量 (Index 2B ~2.0 GB)" :
+                                          "⚡ 2. Light Gaming (Index 2B ~2.0 GB)";
+            _btnDownloadLight.Location = new Point(284, 76);
+            _btnDownloadLight.Size = new Size(260, 36);
+            _btnDownloadLight.Visible = true;
+
+            _btnBrowseModel.Text = ru ? "📁 Свой .gguf" : zh ? "📁 本地 .gguf" : "📁 Browse .gguf";
+            _btnBrowseModel.Location = new Point(554, 76);
+            _btnBrowseModel.Size = new Size(150, 36);
             _btnBrowseModel.Visible = true;
 
-            _btnOpenFolder.Text = ru ? "📂 Открыть папку" : zh ? "📂 打开文件夹" : "📂 Open Folder";
-            _btnOpenFolder.Location = new Point(519, 76);
-            _btnOpenFolder.Size = new Size(186, 36);
-            _btnOpenFolder.Visible = true;
-
+            _btnOpenFolder.Visible = false;
             _btnDeleteModel.Visible = false;
+            _btnQuickSwitch.Visible = false;
         }
     }
 
@@ -1678,13 +2026,28 @@ public partial class Form1 : Form
                 File.Delete(path);
             }
 
-            string partFile = Path.Combine(_baseDir, "models", ModelFilename + ".part");
+            string partFile = path + ".part";
             if (File.Exists(partFile))
             {
                 try { File.Delete(partFile); } catch { }
             }
 
-            SaveCustomModelPath("");
+            string smartPath = Path.Combine(_baseDir, "models", SmartModelFilename);
+            string lightPath = Path.Combine(_baseDir, "models", LightModelFilename);
+
+            if (path.Equals(smartPath, StringComparison.OrdinalIgnoreCase) && File.Exists(lightPath))
+            {
+                SaveCustomModelPath(lightPath);
+            }
+            else if (path.Equals(lightPath, StringComparison.OrdinalIgnoreCase) && File.Exists(smartPath))
+            {
+                SaveCustomModelPath(smartPath);
+            }
+            else
+            {
+                SaveCustomModelPath("");
+            }
+
             UpdateModelStatus();
 
             ShowNotification(ru ? $"✅ Файл модели удален. Освобождено {gb:F2} ГБ на диске!" :
@@ -1702,15 +2065,43 @@ public partial class Form1 : Form
 
     private void BrowseModelFile()
     {
+        bool ru = _currentLang == "ru";
+        bool zh = _currentLang == "zh";
+
+        string modelsDir = Path.Combine(_baseDir, "models");
+        if (!Directory.Exists(modelsDir))
+        {
+            try { Directory.CreateDirectory(modelsDir); } catch { }
+        }
+
         using var ofd = new OpenFileDialog
         {
-            Title = "Выберите файл модели нейросети",
-            Filter = "GGUF Models (*.gguf)|*.gguf|All Files (*.*)|*.*"
+            Title = ru ? "Выберите файл модели нейросети (GGUF)" :
+                    zh ? "选择本地大模型文件 (GGUF)" :
+                         "Select AI Model File (GGUF)",
+            Filter = "GGUF Models (*.gguf)|*.gguf|All Files (*.*)|*.*",
+            InitialDirectory = modelsDir
         };
         if (ofd.ShowDialog() == DialogResult.OK)
         {
             SaveCustomModelPath(ofd.FileName);
             UpdateModelStatus();
+
+            if (_isServerHealthy)
+            {
+                ShowNotification(ru ? "Перезапуск сервера с новой моделью..." :
+                                 zh ? "正在使用新模型重启服务..." :
+                                      "Restarting server with new model...");
+                StopServer();
+                Thread.Sleep(800);
+                StartServer();
+            }
+            else
+            {
+                ShowNotification(ru ? "Модель выбрана! Нажмите «Запустить сервер»." :
+                                 zh ? "模型已选定！点击“启动服务器”。" :
+                                      "Model selected! Click 'Start Server'.");
+            }
         }
     }
 
@@ -1764,14 +2155,21 @@ public partial class Form1 : Form
         catch { }
     }
 
-    private void StartDownload()
+    private void StartDownload(bool isLight = false)
     {
         string modelsDir = Path.Combine(_baseDir, "models");
         Directory.CreateDirectory(modelsDir);
-        string destFile = Path.Combine(modelsDir, ModelFilename);
+
+        string targetFilename = isLight ? LightModelFilename : SmartModelFilename;
+        string targetUrl = isLight ? LightModelUrl : SmartModelUrl;
+        long targetBytes = isLight ? LightModelBytes : SmartModelBytes;
+
+        string destFile = Path.Combine(modelsDir, targetFilename);
         string partFile = destFile + ".part";
 
         _btnDownloadModel.Visible = false;
+        _btnDownloadLight.Visible = false;
+        _btnQuickSwitch.Visible = false;
         _btnBrowseModel.Visible = false;
         _btnOpenFolder.Visible = false;
         _btnDeleteModel.Visible = false;
@@ -1788,7 +2186,7 @@ public partial class Form1 : Form
                 var psi = new ProcessStartInfo
                 {
                     FileName = "curl.exe",
-                    Arguments = $"-L -C - --fail --retry 5 --retry-delay 2 -o \"{partFile}\" \"{ModelHfUrl}\"",
+                    Arguments = $"-L -C - --fail --retry 5 --retry-delay 2 -o \"{partFile}\" \"{targetUrl}\"",
                     CreateNoWindow = true,
                     UseShellExecute = false
                 };
@@ -1820,15 +2218,16 @@ public partial class Form1 : Form
                             lastBytes = currentBytes;
                             lastTime = now;
 
-                            int percent = (int)Math.Clamp((currentBytes * 100) / ExpectedModelBytes, 0, 100);
+                            int percent = (int)Math.Clamp((currentBytes * 100) / targetBytes, 0, 100);
                             double mbDown = currentBytes / (1024.0 * 1024.0);
-                            double mbTotal = ExpectedModelBytes / (1024.0 * 1024.0);
+                            double mbTotal = targetBytes / (1024.0 * 1024.0);
                             double mbSpeed = speedBps / (1024.0 * 1024.0);
 
                             BeginInvoke(() =>
                             {
                                 _pbDownload.Value = percent;
-                                _lblDownloadProgress.Text = $"Загрузка: {mbDown:F1} / {mbTotal:F1} МБ ({percent}%) — {mbSpeed:F1} МБ/с";
+                                string tag = isLight ? "Index 2B" : "Qwen 7B";
+                                _lblDownloadProgress.Text = $"Загрузка ({tag}): {mbDown:F1} / {mbTotal:F1} МБ ({percent}%) — {mbSpeed:F1} МБ/с";
                             });
                         }
                     }
@@ -1837,7 +2236,8 @@ public partial class Form1 : Form
                 if (_curlDownloadProcess?.ExitCode == 0 && File.Exists(partFile))
                 {
                     var finalInfo = new FileInfo(partFile);
-                    if (finalInfo.Length >= 4500000000L)
+                    long minAcceptable = isLight ? 1900000000L : 4500000000L;
+                    if (finalInfo.Length >= minAcceptable)
                     {
                         if (File.Exists(destFile)) File.Delete(destFile);
                         File.Move(partFile, destFile);
@@ -1847,8 +2247,13 @@ public partial class Form1 : Form
                             _pbDownload.Visible = false;
                             _lblDownloadProgress.Visible = false;
                             _btnCancelDownload.Visible = false;
+                            SaveCustomModelPath(destFile);
                             UpdateModelStatus();
-                            ShowNotification("Модель успешно загружена и готова к работе!");
+                            bool ru = _currentLang == "ru";
+                            bool zh = _currentLang == "zh";
+                            ShowNotification(ru ? "Модель успешно загружена и готова к работе!" :
+                                             zh ? "模型下载成功，已就绪！" :
+                                                  "Model successfully downloaded and ready!");
                         });
                         return;
                     }
@@ -1860,7 +2265,9 @@ public partial class Form1 : Form
                     _lblDownloadProgress.Visible = false;
                     _btnCancelDownload.Visible = false;
                     UpdateModelStatus();
-                    ShowNotification("Загрузка приостановлена. Нажмите «Скачать» для продолжения.");
+                    bool ru = _currentLang == "ru";
+                    bool zh = _currentLang == "zh";
+                    ShowNotification(ru ? "Загрузка приостановлена." : zh ? "下载已暂停。" : "Download paused.");
                 });
             }
             catch (Exception ex)
@@ -1921,12 +2328,14 @@ public partial class Form1 : Form
 
     private async void CheckForUpdates(bool isManualClick = true)
     {
+        if (_isUpdatingApp) return;
+
         try
         {
             if (isManualClick)
             {
                 _btnCheckUpdate.Text = _currentLang == "zh" ? "⏳ 检查中..." : _currentLang == "en" ? "⏳ Checking..." : "⏳ Проверка...";
-                _btnCheckUpdate.Enabled = false;
+                _btnCheckUpdate.Cursor = Cursors.WaitCursor;
             }
 
             using var client = new HttpClient();
@@ -2026,36 +2435,94 @@ public partial class Form1 : Form
         }
         finally
         {
-            _btnCheckUpdate.Enabled = true;
+            if (!_isUpdatingApp)
+            {
+                _btnCheckUpdate.Cursor = Cursors.Hand;
+            }
         }
     }
 
     private async Task PerformSelfUpdateAsync(string downloadUrl, string newVersion)
     {
+        if (_isUpdatingApp) return;
+
         string exePath = Environment.ProcessPath ?? Path.Combine(_baseDir, "AI_Translator.exe");
         string tempNewExe = Path.Combine(Path.GetTempPath(), $"AI_Translator_update_{Guid.NewGuid():N}.exe");
         string updaterScript = Path.Combine(Path.GetTempPath(), "ai_translator_updater.bat");
 
+        _isUpdatingApp = true;
+        _updateCts = new CancellationTokenSource();
+
         try
         {
-            _btnCheckUpdate.Text = "⏳ Скачивание...";
-            _btnCheckUpdate.Enabled = false;
-            ShowNotification(_currentLang == "zh" ? "正在下载更新..." : _currentLang == "en" ? "Downloading update..." : "Скачивание обновления с GitHub...");
+            _btnCheckUpdate.Cursor = Cursors.WaitCursor;
+            _btnCheckUpdate.BackColor = Color.FromArgb(37, 99, 235); // Vivid Blue Accent
+            _btnCheckUpdate.ForeColor = Color.White;
+            _btnCheckUpdate.Text = "⏳ 0%";
+            _pbAppUpdate.Value = 0;
+            _pbAppUpdate.Visible = true;
+
+            _notificationTimer.Stop();
+            _lblNotification.Text = _currentLang == "zh" ? "正在连接 GitHub..." : _currentLang == "en" ? "Connecting to GitHub..." : "Подключение к GitHub...";
 
             using var client = new HttpClient();
             client.DefaultRequestHeaders.UserAgent.ParseAdd("AI-Translator-App");
-            using var resp = await client.GetAsync(downloadUrl, HttpCompletionOption.ResponseHeadersRead);
+            using var resp = await client.GetAsync(downloadUrl, HttpCompletionOption.ResponseHeadersRead, _updateCts.Token);
             resp.EnsureSuccessStatusCode();
 
-            using (var fs = new FileStream(tempNewExe, FileMode.Create, FileAccess.Write, FileShare.None))
+            long totalBytes = resp.Content.Headers.ContentLength ?? -1L;
+            double totalMb = totalBytes > 0 ? totalBytes / (1024.0 * 1024.0) : 0;
+
+            using (var contentStream = await resp.Content.ReadAsStreamAsync(_updateCts.Token))
+            using (var fs = new FileStream(tempNewExe, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true))
             {
-                await resp.Content.CopyToAsync(fs);
+                byte[] buffer = new byte[81920];
+                long totalRead = 0;
+                int bytesRead;
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                long lastUpdateTick = 0;
+
+                while ((bytesRead = await contentStream.ReadAsync(buffer, 0, buffer.Length, _updateCts.Token)) > 0)
+                {
+                    await fs.WriteAsync(buffer.AsMemory(0, bytesRead), _updateCts.Token);
+                    totalRead += bytesRead;
+
+                    if (sw.ElapsedMilliseconds - lastUpdateTick > 100 || (totalBytes > 0 && totalRead == totalBytes))
+                    {
+                        lastUpdateTick = sw.ElapsedMilliseconds;
+                        double downloadedMb = totalRead / (1024.0 * 1024.0);
+                        double elapsedSec = sw.Elapsed.TotalSeconds;
+                        double speedMb = elapsedSec > 0.1 ? (downloadedMb / elapsedSec) : 0;
+
+                        if (totalBytes > 0)
+                        {
+                            int pct = (int)Math.Clamp((totalRead * 100) / totalBytes, 0, 100);
+                            _pbAppUpdate.Value = pct;
+                            _btnCheckUpdate.Text = $"⏳ {pct}% ({downloadedMb:F0}/{totalMb:F0} МБ)";
+                            _lblNotification.Text = _currentLang == "zh" ?
+                                $"正在下载更新: {pct}% ({downloadedMb:F1}/{totalMb:F1} MB) — {speedMb:F1} MB/s" :
+                                _currentLang == "en" ?
+                                $"Downloading update: {pct}% ({downloadedMb:F1}/{totalMb:F1} MB) — {speedMb:F1} MB/s" :
+                                $"Скачивание обновления {newVersion}: {pct}% ({downloadedMb:F1}/{totalMb:F1} МБ) — {speedMb:F1} МБ/с";
+                        }
+                        else
+                        {
+                            _btnCheckUpdate.Text = $"⏳ {downloadedMb:F1} МБ";
+                            _lblNotification.Text = $"Скачивание: {downloadedMb:F1} МБ — {speedMb:F1} МБ/с";
+                        }
+                    }
+                }
             }
 
             if (new FileInfo(tempNewExe).Length < 1024 * 1024)
             {
                 throw new Exception("Скачанный файл повреждён или слишком мал.");
             }
+
+            _pbAppUpdate.Value = 100;
+            _btnCheckUpdate.BackColor = Color.FromArgb(22, 163, 74); // Success green
+            _btnCheckUpdate.Text = "✅ Перезапуск...";
+            _lblNotification.Text = _currentLang == "zh" ? "更新下载完成，正在重启..." : _currentLang == "en" ? "Update ready, restarting..." : "Обновление скачано! Перезапуск программы...";
 
             // Write batch updater
             int pid = Process.GetCurrentProcess().Id;
@@ -2069,7 +2536,7 @@ start """" ""{exePath}""
 del ""{tempNewExe}"" >nul 2>&1
 (goto) 2>nul & del ""%~f0""
 ";
-            File.WriteAllText(updaterScript, batContent, System.Text.Encoding.GetEncoding(866));
+            File.WriteAllText(updaterScript, batContent, System.Text.Encoding.UTF8);
 
             Process.Start(new ProcessStartInfo
             {
@@ -2082,11 +2549,33 @@ del ""{tempNewExe}"" >nul 2>&1
             _isExiting = true;
             Application.Exit();
         }
+        catch (OperationCanceledException)
+        {
+            try { if (File.Exists(tempNewExe)) File.Delete(tempNewExe); } catch { }
+            _pbAppUpdate.Visible = false;
+            _btnCheckUpdate.Text = _currentLang == "ru" ? $"⚡ Обновить ({AppVersion})" :
+                                   _currentLang == "zh" ? $"⚡ 检查更新 ({AppVersion})" :
+                                        $"⚡ Update ({AppVersion})";
+            _btnCheckUpdate.BackColor = Color.FromArgb(55, 60, 68);
+            _btnCheckUpdate.Cursor = Cursors.Hand;
+            ShowNotification("Скачивание обновления отменено.");
+        }
         catch (Exception ex)
         {
-            _btnCheckUpdate.Text = $"⚡ {AppVersion}";
-            _btnCheckUpdate.Enabled = true;
+            try { if (File.Exists(tempNewExe)) File.Delete(tempNewExe); } catch { }
+            _pbAppUpdate.Visible = false;
+            _btnCheckUpdate.Text = _currentLang == "ru" ? $"⚡ Обновить ({AppVersion})" :
+                                   _currentLang == "zh" ? $"⚡ 检查更新 ({AppVersion})" :
+                                        $"⚡ Update ({AppVersion})";
+            _btnCheckUpdate.BackColor = Color.FromArgb(55, 60, 68);
+            _btnCheckUpdate.Cursor = Cursors.Hand;
             MessageBox.Show("Ошибка обновления: " + ex.Message, "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            _isUpdatingApp = false;
+            _updateCts?.Dispose();
+            _updateCts = null;
         }
     }
 
@@ -2107,4 +2596,751 @@ del ""{tempNewExe}"" >nul 2>&1
             return false;
         }
     }
+
+    // ==========================================
+    // Quick Translate Side Panel Implementation
+    // ==========================================
+    private void CreateSideTranslatorPanel()
+    {
+        _pnlSideTranslator = new Panel
+        {
+            Dock = DockStyle.Left,
+            Width = SidePanelWidth,
+            BackColor = Color.FromArgb(24, 25, 29),
+            ForeColor = Color.White,
+            Visible = false,
+            Padding = new Padding(14)
+        };
+
+        // Right separator border
+        _pnlSideTranslator.Paint += (s, e) =>
+        {
+            using var pen = new Pen(Color.FromArgb(45, 49, 58), 1);
+            e.Graphics.DrawLine(pen, _pnlSideTranslator.Width - 1, 0, _pnlSideTranslator.Width - 1, _pnlSideTranslator.Height);
+        };
+
+        // Header: Title + Close Button
+        _lblSideTitle = new Label
+        {
+            Text = "📝 Быстрый перевод",
+            Font = new Font("Segoe UI", 11.5f, FontStyle.Bold),
+            ForeColor = Color.White,
+            Location = new Point(14, 12),
+            Size = new Size(280, 26),
+            TextAlign = ContentAlignment.MiddleLeft
+        };
+
+        _btnCloseSide = new Button
+        {
+            Text = "✕",
+            Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+            BackColor = Color.FromArgb(45, 49, 58),
+            ForeColor = Color.FromArgb(200, 205, 215),
+            FlatStyle = FlatStyle.Flat,
+            Size = new Size(28, 28),
+            Location = new Point(338, 10),
+            Cursor = Cursors.Hand
+        };
+        _btnCloseSide.FlatAppearance.BorderSize = 0;
+        _btnCloseSide.Click += (s, e) => CloseSidePanel();
+
+        // Top Bar: Source Language (Auto-detect) + Paste + Clear
+        _cbSourceLanguage = new ComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            Font = new Font("Segoe UI", 9f),
+            BackColor = Color.FromArgb(36, 39, 45),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Location = new Point(14, 44),
+            Size = new Size(165, 28)
+        };
+
+        _btnSidePaste = new Button
+        {
+            Text = "📋 Вставить",
+            Font = new Font("Segoe UI", 8.8f),
+            BackColor = Color.FromArgb(45, 49, 58),
+            ForeColor = Color.FromArgb(220, 225, 235),
+            FlatStyle = FlatStyle.Flat,
+            Size = new Size(92, 28),
+            Location = new Point(184, 44),
+            Cursor = Cursors.Hand
+        };
+        _btnSidePaste.FlatAppearance.BorderSize = 0;
+        _btnSidePaste.Click += (s, e) =>
+        {
+            try
+            {
+                if (Clipboard.ContainsText())
+                {
+                    string paste = Clipboard.GetText();
+                    _txtSideInput.Text = paste;
+                    _txtSideInput.SelectionStart = _txtSideInput.Text.Length;
+                    _txtSideInput.Focus();
+                }
+            }
+            catch { }
+        };
+
+        _btnSideClear = new Button
+        {
+            Text = "✕ Очистить",
+            Font = new Font("Segoe UI", 8.5f),
+            BackColor = Color.FromArgb(38, 41, 48),
+            ForeColor = Color.FromArgb(156, 163, 175),
+            FlatStyle = FlatStyle.Flat,
+            Size = new Size(86, 28),
+            Location = new Point(280, 44),
+            Cursor = Cursors.Hand
+        };
+        _btnSideClear.FlatAppearance.BorderSize = 0;
+        _btnSideClear.Click += (s, e) =>
+        {
+            _autoTranslateDebounceTimer?.Stop();
+            _autoTranslateDebounceTimer?.Dispose();
+            _autoTranslateDebounceTimer = null;
+            _lastTranslatedText = "";
+            _txtSideInput.Text = "";
+            _txtSideOutput.Text = "";
+            _lblSideStatus.Text = "";
+            _txtSideInput.Focus();
+        };
+
+        // Top Box: Input TextBox (Height = 195)
+        _txtSideInput = new TextBox
+        {
+            Multiline = true,
+            ScrollBars = ScrollBars.Vertical,
+            Font = new Font("Segoe UI", 9.5f),
+            BackColor = Color.FromArgb(32, 34, 39),
+            ForeColor = Color.White,
+            BorderStyle = BorderStyle.FixedSingle,
+            Location = new Point(14, 76),
+            Size = new Size(352, 195)
+        };
+        _txtSideInput.KeyDown += (s, e) =>
+        {
+            if (e.Control && e.KeyCode == Keys.Enter)
+            {
+                e.SuppressKeyPress = true;
+                _ = PerformQuickTranslationAsync();
+            }
+        };
+
+        // Auto-translate listener with debounce & 1-to-1 unchanged text suppression
+        _txtSideInput.TextChanged += (s, e) =>
+        {
+            if (!_isAutoTranslateEnabled) return;
+
+            string current = _txtSideInput.Text.Trim();
+            if (string.IsNullOrWhiteSpace(current))
+            {
+                _txtSideOutput.Text = "";
+                _lblSideStatus.Text = "";
+                _lastTranslatedText = "";
+                return;
+            }
+
+            // If text is 1-in-1 unchanged, do not translate!
+            if (current == _lastTranslatedText)
+            {
+                return;
+            }
+
+            _autoTranslateDebounceTimer?.Stop();
+            _autoTranslateDebounceTimer?.Dispose();
+            _autoTranslateDebounceTimer = new System.Windows.Forms.Timer { Interval = 450 };
+            _autoTranslateDebounceTimer.Tick += (ts, te) =>
+            {
+                _autoTranslateDebounceTimer?.Stop();
+                _autoTranslateDebounceTimer?.Dispose();
+                _autoTranslateDebounceTimer = null;
+
+                if (!_isAutoTranslateEnabled) return;
+                string toTrans = _txtSideInput.Text.Trim();
+                if (!string.IsNullOrWhiteSpace(toTrans) && toTrans != _lastTranslatedText)
+                {
+                    _ = PerformQuickTranslationAsync();
+                }
+            };
+            _autoTranslateDebounceTimer.Start();
+        };
+
+        // Middle Row: Prominent Translate Button + Auto-translate Toggle Button
+        _btnSideTranslate = new Button
+        {
+            Text = "⚡ Перевести (Ctrl+Enter)",
+            Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+            BackColor = Color.FromArgb(59, 130, 246),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Size = new Size(224, 40),
+            Location = new Point(14, 277),
+            Cursor = Cursors.Hand
+        };
+        _btnSideTranslate.FlatAppearance.BorderSize = 0;
+        _btnSideTranslate.Click += (s, e) => _ = PerformQuickTranslationAsync();
+
+        _btnAutoTranslate = new Button
+        {
+            Text = "⚡ Авто: ВЫКЛ",
+            Font = new Font("Segoe UI", 9f, FontStyle.Bold),
+            BackColor = Color.FromArgb(45, 49, 58),
+            ForeColor = Color.FromArgb(160, 165, 175),
+            FlatStyle = FlatStyle.Flat,
+            Size = new Size(122, 40),
+            Location = new Point(244, 277),
+            Cursor = Cursors.Hand
+        };
+        _btnAutoTranslate.FlatAppearance.BorderSize = 0;
+        _btnAutoTranslate.Click += (s, e) =>
+        {
+            _isAutoTranslateEnabled = !_isAutoTranslateEnabled;
+            UpdateAutoTranslateButtonStyle();
+
+            if (_isAutoTranslateEnabled)
+            {
+                string text = _txtSideInput.Text.Trim();
+                if (!string.IsNullOrWhiteSpace(text) && text != _lastTranslatedText)
+                {
+                    _ = PerformQuickTranslationAsync();
+                }
+            }
+            else
+            {
+                _autoTranslateDebounceTimer?.Stop();
+                _autoTranslateDebounceTimer?.Dispose();
+                _autoTranslateDebounceTimer = null;
+            }
+        };
+
+        // Status Label under the button
+        _lblSideStatus = new Label
+        {
+            Text = "",
+            Font = new Font("Segoe UI", 8.5f),
+            ForeColor = Color.FromArgb(156, 163, 175),
+            Location = new Point(14, 321),
+            Size = new Size(352, 18),
+            TextAlign = ContentAlignment.MiddleLeft
+        };
+
+        // Bottom Bar: Target Language Selection ("На язык:") + Swap + Large Copy Button
+        _lblTargetLang = new Label
+        {
+            Text = "На язык:",
+            Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+            ForeColor = Color.FromArgb(156, 163, 175),
+            Location = new Point(14, 347),
+            Size = new Size(52, 22),
+            TextAlign = ContentAlignment.MiddleLeft
+        };
+
+        _cbTargetLanguage = new ComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            Font = new Font("Segoe UI", 9f),
+            BackColor = Color.FromArgb(36, 39, 45),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Location = new Point(68, 344),
+            Size = new Size(100, 28)
+        };
+
+        _btnSwapLanguages = new Button
+        {
+            Text = "⇄",
+            Font = new Font("Segoe UI", 10.5f, FontStyle.Bold),
+            BackColor = Color.FromArgb(45, 49, 58),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Size = new Size(32, 28),
+            Location = new Point(172, 344),
+            Cursor = Cursors.Hand
+        };
+        _btnSwapLanguages.FlatAppearance.BorderSize = 0;
+        _btnSwapLanguages.Click += (s, e) => SwapTranslationDirection();
+
+        // Extra wide & large copy button so it's effortless to click!
+        _btnSideCopy = new Button
+        {
+            Text = "📋 Скопировать",
+            Font = new Font("Segoe UI", 9.2f, FontStyle.Bold),
+            BackColor = Color.FromArgb(16, 185, 129),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Size = new Size(156, 30),
+            Location = new Point(210, 342),
+            Cursor = Cursors.Hand
+        };
+        _btnSideCopy.FlatAppearance.BorderSize = 0;
+        _btnSideCopy.Click += (s, e) =>
+        {
+            string outText = _txtSideOutput.Text;
+            if (!string.IsNullOrWhiteSpace(outText))
+            {
+                try
+                {
+                    Clipboard.SetText(outText);
+                    ShowNotification(_currentLang switch { "zh" => "翻译结果已复制！", "en" => "Translation copied!", _ => "Перевод скопирован в буфер!" });
+                }
+                catch { }
+            }
+        };
+
+        // Bottom Box: Output TextBox (Height = 290)
+        _txtSideOutput = new TextBox
+        {
+            Multiline = true,
+            ReadOnly = true,
+            ScrollBars = ScrollBars.Vertical,
+            Font = new Font("Segoe UI", 9.5f),
+            BackColor = Color.FromArgb(18, 19, 22),
+            ForeColor = Color.FromArgb(240, 243, 250),
+            BorderStyle = BorderStyle.FixedSingle,
+            Location = new Point(14, 376),
+            Size = new Size(352, 290)
+        };
+
+        // Bottom Hint Label
+        _lblSideHint = new Label
+        {
+            Text = "💡 Термины Starsector, сленг и фракции",
+            Font = new Font("Segoe UI", 8f),
+            ForeColor = Color.FromArgb(107, 114, 128),
+            Location = new Point(14, 672),
+            Size = new Size(352, 20),
+            TextAlign = ContentAlignment.MiddleCenter
+        };
+
+        PopulateTranslateLanguages();
+        UpdateAutoTranslateButtonStyle();
+
+        _pnlSideTranslator.Controls.Add(_lblSideTitle);
+        _pnlSideTranslator.Controls.Add(_btnCloseSide);
+        _pnlSideTranslator.Controls.Add(_cbSourceLanguage);
+        _pnlSideTranslator.Controls.Add(_btnSidePaste);
+        _pnlSideTranslator.Controls.Add(_btnSideClear);
+        _pnlSideTranslator.Controls.Add(_txtSideInput);
+        _pnlSideTranslator.Controls.Add(_btnSideTranslate);
+        _pnlSideTranslator.Controls.Add(_btnAutoTranslate);
+        _pnlSideTranslator.Controls.Add(_lblSideStatus);
+        _pnlSideTranslator.Controls.Add(_lblTargetLang);
+        _pnlSideTranslator.Controls.Add(_cbTargetLanguage);
+        _pnlSideTranslator.Controls.Add(_btnSwapLanguages);
+        _pnlSideTranslator.Controls.Add(_btnSideCopy);
+        _pnlSideTranslator.Controls.Add(_txtSideOutput);
+        _pnlSideTranslator.Controls.Add(_lblSideHint);
+    }
+
+    private void UpdateAutoTranslateButtonStyle()
+    {
+        if (_btnAutoTranslate == null) return;
+        bool ru = _currentLang == "ru";
+        bool zh = _currentLang == "zh";
+
+        if (_isAutoTranslateEnabled)
+        {
+            _btnAutoTranslate.BackColor = Color.FromArgb(16, 185, 129); // Vibrant emerald green
+            _btnAutoTranslate.ForeColor = Color.White;
+            _btnAutoTranslate.Text = ru ? "⚡ Авто: ВКЛ" : zh ? "⚡ 自动: 开启" : "⚡ Auto: ON";
+        }
+        else
+        {
+            _btnAutoTranslate.BackColor = Color.FromArgb(45, 49, 58);
+            _btnAutoTranslate.ForeColor = Color.FromArgb(160, 165, 175);
+            _btnAutoTranslate.Text = ru ? "⚡ Авто: ВЫКЛ" : zh ? "⚡ 自动: 关闭" : "⚡ Auto: OFF";
+        }
+    }
+
+    private void PopulateTranslateLanguages()
+    {
+        if (_cbSourceLanguage == null || _cbTargetLanguage == null) return;
+
+        int prevSrcIdx = _cbSourceLanguage.SelectedIndex;
+        int prevTgtIdx = _cbTargetLanguage.SelectedIndex;
+
+        _cbSourceLanguage.Items.Clear();
+        _cbTargetLanguage.Items.Clear();
+
+        bool ru = _currentLang == "ru";
+        bool zh = _currentLang == "zh";
+
+        // Source: Auto-detect + specific languages
+        _cbSourceLanguage.Items.Add(ru ? "🌐 Автоопределение" : zh ? "🌐 自动检测" : "🌐 Auto-detect");
+        _cbSourceLanguage.Items.Add("🇬🇧 English");
+        _cbSourceLanguage.Items.Add("🇷🇺 Русский");
+        _cbSourceLanguage.Items.Add(ru ? "🇨🇳 Китайский" : zh ? "🇨🇳 中文" : "🇨🇳 Chinese");
+        _cbSourceLanguage.Items.Add(ru ? "🇩🇪 Немецкий" : zh ? "🇩🇪 德语" : "🇩🇪 German");
+        _cbSourceLanguage.Items.Add(ru ? "🇫🇷 Французский" : zh ? "🇫🇷 法语" : "🇫🇷 French");
+        _cbSourceLanguage.Items.Add(ru ? "🇯🇵 Японский" : zh ? "🇯🇵 日语" : "🇯🇵 Japanese");
+
+        // Target: specific languages (default Russian)
+        _cbTargetLanguage.Items.Add("🇷🇺 Русский");
+        _cbTargetLanguage.Items.Add("🇬🇧 English");
+        _cbTargetLanguage.Items.Add(ru ? "🇨🇳 Китайский" : zh ? "🇨🇳 中文" : "🇨🇳 Chinese");
+        _cbTargetLanguage.Items.Add(ru ? "🇩🇪 Немецкий" : zh ? "🇩🇪 德语" : "🇩🇪 German");
+        _cbTargetLanguage.Items.Add(ru ? "🇫🇷 Французский" : zh ? "🇫🇷 法语" : "🇫🇷 French");
+        _cbTargetLanguage.Items.Add(ru ? "🇯🇵 Японский" : zh ? "🇯🇵 日语" : "🇯🇵 Japanese");
+
+        _cbSourceLanguage.SelectedIndex = (prevSrcIdx >= 0 && prevSrcIdx < _cbSourceLanguage.Items.Count) ? prevSrcIdx : 0;
+        _cbTargetLanguage.SelectedIndex = (prevTgtIdx >= 0 && prevTgtIdx < _cbTargetLanguage.Items.Count) ? prevTgtIdx : 0;
+    }
+
+    private string GetSelectedSourceLangCode()
+    {
+        return _cbSourceLanguage?.SelectedIndex switch
+        {
+            1 => "en",
+            2 => "ru",
+            3 => "zh-CN",
+            4 => "de",
+            5 => "fr",
+            6 => "ja",
+            _ => "auto"
+        };
+    }
+
+    private string GetSelectedTargetLangCode()
+    {
+        return _cbTargetLanguage?.SelectedIndex switch
+        {
+            1 => "en",
+            2 => "zh-CN",
+            3 => "de",
+            4 => "fr",
+            5 => "ja",
+            _ => "ru"
+        };
+    }
+
+    private void SetSourceLangCode(string code)
+    {
+        if (_cbSourceLanguage == null) return;
+        _cbSourceLanguage.SelectedIndex = code.ToLowerInvariant() switch
+        {
+            "en" => 1,
+            "ru" => 2,
+            "zh" or "zh-cn" => 3,
+            "de" => 4,
+            "fr" => 5,
+            "ja" => 6,
+            _ => 0
+        };
+    }
+
+    private void SetTargetLangCode(string code)
+    {
+        if (_cbTargetLanguage == null) return;
+        _cbTargetLanguage.SelectedIndex = code.ToLowerInvariant() switch
+        {
+            "en" => 1,
+            "zh" or "zh-cn" => 2,
+            "de" => 3,
+            "fr" => 4,
+            "ja" => 5,
+            _ => 0
+        };
+    }
+
+    private void SwapTranslationDirection()
+    {
+        string src = GetSelectedSourceLangCode();
+        string tgt = GetSelectedTargetLangCode();
+
+        if (src == "auto")
+        {
+            SetSourceLangCode(tgt);
+            SetTargetLangCode(tgt == "ru" ? "en" : "ru");
+        }
+        else
+        {
+            SetSourceLangCode(tgt);
+            SetTargetLangCode(src);
+        }
+
+        string outText = _txtSideOutput.Text.Trim();
+        if (!string.IsNullOrWhiteSpace(outText))
+        {
+            _txtSideInput.Text = outText;
+            _txtSideOutput.Text = "";
+            _lblSideStatus.Text = "";
+            _lastTranslatedText = "";
+            _txtSideInput.Focus();
+        }
+    }
+
+    private void ToggleSidePanel()
+    {
+        if (!_isSidePanelOpen)
+        {
+            _savedFormLeft = this.Left;
+            var screen = Screen.FromControl(this).WorkingArea;
+            int newLeft = this.Left - SidePanelWidth;
+            if (newLeft < screen.Left)
+                newLeft = screen.Left;
+
+            this.SuspendLayout();
+            _pnlSideTranslator.Visible = true;
+            this.Left = newLeft;
+            this.Width = BaseFormWidth + SidePanelWidth;
+            _isSidePanelOpen = true;
+
+            UpdateSidePanelTexts();
+            _btnToggleSidePanel.Text = _currentLang switch { "zh" => "▶ 隐藏翻译器", "en" => "▶ Hide Translator", _ => "▶ Скрыть переводчик" };
+            _btnToggleSidePanel.BackColor = Color.FromArgb(79, 70, 229);
+
+            this.ResumeLayout(true);
+            _txtSideInput.Focus();
+        }
+        else
+        {
+            CloseSidePanel();
+        }
+    }
+
+    private void CloseSidePanel()
+    {
+        if (!_isSidePanelOpen) return;
+
+        this.SuspendLayout();
+        _isSidePanelOpen = false;
+
+        // 1. Cancel in-flight translation & debounce timers
+        try
+        {
+            _quickTransCancelSource?.Cancel();
+            _quickTransCancelSource?.Dispose();
+        }
+        catch { }
+        _quickTransCancelSource = null;
+
+        _autoTranslateDebounceTimer?.Stop();
+        _autoTranslateDebounceTimer?.Dispose();
+        _autoTranslateDebounceTimer = null;
+
+        // 2. Clear all text, cached buffers & reset auto-translate state as requested by user
+        _txtSideInput.Text = "";
+        _txtSideOutput.Text = "";
+        _lblSideStatus.Text = "";
+        _lastTranslatedText = "";
+        _isAutoTranslateEnabled = false;
+        UpdateAutoTranslateButtonStyle();
+
+        // 3. Hide side panel and restore exact form size and screen position
+        _pnlSideTranslator.Visible = false;
+        this.Width = BaseFormWidth;
+
+        var screen = Screen.FromControl(this).WorkingArea;
+        int targetLeft = _savedFormLeft >= 0 ? _savedFormLeft : (this.Left + SidePanelWidth);
+        if (targetLeft + BaseFormWidth > screen.Right)
+            targetLeft = screen.Right - BaseFormWidth;
+        if (targetLeft < screen.Left)
+            targetLeft = screen.Left;
+        this.Left = targetLeft;
+
+        _btnToggleSidePanel.Text = _currentLang switch { "zh" => "◀ 快速翻译", "en" => "◀ Quick Translate", _ => "◀ Быстрый перевод" };
+        _btnToggleSidePanel.BackColor = Color.FromArgb(55, 60, 68);
+
+        this.ResumeLayout(true);
+
+        // 4. Clean up memory and working set
+        try
+        {
+            GC.Collect(1, GCCollectionMode.Forced, false);
+            SetProcessWorkingSetSize(Process.GetCurrentProcess().Handle, (IntPtr)(-1), (IntPtr)(-1));
+        }
+        catch { }
+    }
+
+    private void UpdateSidePanelTexts()
+    {
+        if (_pnlSideTranslator == null) return;
+        bool ru = _currentLang == "ru";
+        bool zh = _currentLang == "zh";
+
+        _btnToggleSidePanel.Text = _isSidePanelOpen ?
+            (ru ? "▶ Скрыть переводчик" : zh ? "▶ 隐藏翻译器" : "▶ Hide Translator") :
+            (ru ? "◀ Быстрый перевод" : zh ? "◀ 快速翻译" : "◀ Quick Translate");
+
+        _lblSideTitle.Text = ru ? "📝 Быстрый перевод" : zh ? "📝 快速翻译" : "📝 Quick Translate";
+        _btnSidePaste.Text = ru ? "📋 Вставить" : zh ? "📋 粘贴" : "📋 Paste";
+        _btnSideClear.Text = ru ? "✕ Очистить" : zh ? "✕ 清空" : "✕ Clear";
+        _btnSideTranslate.Text = ru ? "⚡ Перевести (Ctrl+Enter)" : zh ? "⚡ 翻译 (Ctrl+Enter)" : "⚡ Translate (Ctrl+Enter)";
+        _lblTargetLang.Text = ru ? "На язык:" : zh ? "目标语言:" : "Target:";
+        _btnSideCopy.Text = ru ? "📋 Скопировать" : zh ? "📋 复制" : "📋 Copy";
+        _lblSideHint.Text = ru ? "💡 Термины Starsector, сленг и фракции" : zh ? "💡 支持远行星号游戏术语、俚语和派系设定" : "💡 Starsector lore terms, slang & factions";
+
+        PopulateTranslateLanguages();
+        UpdateAutoTranslateButtonStyle();
+    }
+
+    private async Task PerformQuickTranslationAsync()
+    {
+        string input = _txtSideInput.Text.Trim();
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            _txtSideOutput.Text = "";
+            _lblSideStatus.Text = _currentLang == "zh" ? "⚠️ 请先输入要翻译的文本！" : _currentLang == "en" ? "⚠️ Please enter text to translate first!" : "⚠️ Сначала введите текст для перевода!";
+            _lblSideStatus.ForeColor = Color.FromArgb(239, 68, 68);
+            return;
+        }
+
+        try
+        {
+            _quickTransCancelSource?.Cancel();
+            _quickTransCancelSource?.Dispose();
+        }
+        catch { }
+        _quickTransCancelSource = new CancellationTokenSource();
+        var ct = _quickTransCancelSource.Token;
+
+        _btnSideTranslate.Enabled = false;
+        _lblSideStatus.Text = _currentLang == "zh" ? "⏳ 正在翻译..." : _currentLang == "en" ? "⏳ Translating..." : "⏳ Перевод...";
+        _lblSideStatus.ForeColor = Color.FromArgb(96, 165, 250);
+
+        string src = GetSelectedSourceLangCode();
+        string tgt = GetSelectedTargetLangCode();
+        string direction = $"{src}->{tgt}";
+
+        try
+        {
+            string result = "";
+            bool usedAi = false;
+
+            // 1. Try local AI if healthy
+            if (_isServerHealthy)
+            {
+                try
+                {
+                    result = await TranslateViaLocalAiAsync(input, direction, ct);
+                    usedAi = !string.IsNullOrWhiteSpace(result);
+                }
+                catch (OperationCanceledException) { return; }
+                catch (Exception ex)
+                {
+                    Program.Log($"QuickTranslate AI exception: {ex.Message}");
+                }
+            }
+
+            // 2. Fallback to Google Translate if local AI was offline or returned empty
+            if (string.IsNullOrWhiteSpace(result))
+            {
+                result = await TranslateViaGoogleAsync(input, direction, ct);
+            }
+
+            if (ct.IsCancellationRequested) return;
+
+            if (!string.IsNullOrWhiteSpace(result))
+            {
+                _txtSideOutput.Text = result;
+                _lastTranslatedText = input; // Mark this text as translated to avoid duplicate re-translations!
+
+                string currentModel = Path.GetFileName(GetCurrentModelPath());
+                bool isLight = currentModel.Equals(LightModelFilename, StringComparison.OrdinalIgnoreCase);
+                string modelTag = usedAi ? (isLight ? "Index 2B" : "Qwen 7B") : "Google";
+                _lblSideStatus.Text = $"✓ {_currentLang switch { "zh" => "已完成", "en" => "Done", _ => "Готово" }} ({modelTag})";
+                _lblSideStatus.ForeColor = Color.FromArgb(34, 197, 94);
+            }
+            else
+            {
+                _lblSideStatus.Text = _currentLang == "zh" ? "⚠️ 翻译失败" : _currentLang == "en" ? "⚠️ Translation failed" : "⚠️ Ошибка перевода";
+                _lblSideStatus.ForeColor = Color.FromArgb(239, 68, 68);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            if (!ct.IsCancellationRequested)
+            {
+                _lblSideStatus.Text = $"⚠️ {ex.Message}";
+                _lblSideStatus.ForeColor = Color.FromArgb(239, 68, 68);
+            }
+        }
+        finally
+        {
+            _btnSideTranslate.Enabled = true;
+        }
+    }
+
+    private static async Task<string> TranslateViaLocalAiAsync(string text, string direction, CancellationToken ct)
+    {
+        string[] parts = direction.Split("->");
+        string src = parts[0];
+        string tgt = parts[1].ToLowerInvariant();
+        bool toRu = tgt.StartsWith("ru");
+        bool toZh = tgt.StartsWith("zh");
+
+        string systemPrompt;
+        if (toRu)
+        {
+            systemPrompt = "Translate the following message into natural, clear Russian chat speech.\nSTRICT RULES:\n1. Output ONLY the direct Russian translation. Never explain, never converse, never add quotes, notes, or <think> tags.\n2. Output strictly in Russian Cyrillic. Keep words separated by normal spaces.\n3. RARE & ARCHAIC TITLES: Translate English scholarly, administrative, and factional titles accurately (provost -> ректор/прево/декан, lector -> преподаватель/лектор, magister -> магистр, legate -> легат, archon -> архонт, preceptor -> наставник).\n4. MIXED CHAT & SLANG: If message mixes Russian slang with English words (e.g. 'Тип provost' -> 'Типа ректор' or 'Вроде ректора'), translate smoothly into natural Russian.\n5. Starsector terms: d-mod -> д-моды, s-mod -> с-моды, hullmod -> халлмоды, cruiser -> крейсер, flux -> флакс, vent -> сброс, core worlds -> основные миры, domain -> домен.\n6. NO LITERAL IDIOM TRANSLATIONS: Translate actual direct meaning.\n7. Translate simple words simply (Yes -> Да, No -> Нет, Yeah -> Да/Ага).\n\nText to translate:\n" + text;
+        }
+        else if (toZh)
+        {
+            systemPrompt = "请将以下文本翻译为流畅自然的简体中文。\n规则：\n1. 直接输出翻译结果，绝不要包含任何解释、说明、对话、引用或 <think> 思考过程。\n2. 准确传达原文核心意思，避免生硬直译外语俚语或比喻。\n3. 保持游戏用语和 Discord 聊天口语自然流畅。\n\n需要翻译的文本：\n" + text;
+        }
+        else
+        {
+            systemPrompt = "You are a bilingual translator.\nTranslate the following Russian text into natural, clear, conversational English.\nSTRICT RULES:\n1. SENSE OVER WORDS: Translate the communicative meaning and intent, never literal word-by-word syntax.\n2. CLEAR INTERNATIONAL ENGLISH: Use natural, straightforward conversational English that is easily understood by everyone, including people using machine translators. Avoid obscure idioms, complex metaphors, or cryptic hyper-slang.\n3. RUSSIAN IMPERSONAL & CONVERSATIONAL FORMS:\n   - 'не страшно / это не страшно' -> 'no worries / that\\'s fine / no problem' (NEVER 'scary')\n   - 'если что' -> 'by the way / FYI / just so you know' (NEVER 'if needed')\n   - 'пишет [где-то / кто-то]' -> 'it says / it shows [who/where]' (NEVER imperative 'write')\n   - 'может быть / это может быть' -> 'maybe / could be / that\\'s possible' (NEVER unfinished 'this may be')\n   - 'я благодарен / спасибо' -> 'thank you for / thanks for' (NEVER stiff 'I thank you')\n   - 'катка' -> 'game / match'\n4. Output ONLY the direct English translation. Never explain, never converse, never add quotes, notes, or <think> tags.\n5. Keep gaming and Starsector terms natural (d-mods, s-mods, hullmods, flux, vent, provost, lector).\n\nText to translate:\n" + text;
+        }
+
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+        var payload = new JsonObject
+        {
+            ["messages"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["role"] = "user",
+                    ["content"] = systemPrompt
+                }
+            },
+            ["temperature"] = 0.1,
+            ["frequency_penalty"] = 0.2,
+            ["max_tokens"] = Math.Min(2048, Math.Max(512, text.Length * 4))
+        };
+
+        var content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json");
+        var response = await client.PostAsync("http://127.0.0.1:11434/v1/chat/completions", content, ct);
+        response.EnsureSuccessStatusCode();
+
+        string jsonStr = await response.Content.ReadAsStringAsync(ct);
+        var doc = JsonNode.Parse(jsonStr);
+        string? raw = doc?["choices"]?[0]?["message"]?["content"]?.GetValue<string>();
+        if (string.IsNullOrWhiteSpace(raw)) return "";
+
+        string cleaned = raw.Trim();
+        if (cleaned.Contains("</think>"))
+            cleaned = cleaned.Substring(cleaned.LastIndexOf("</think>") + 8).Trim();
+        else if (cleaned.Contains("<think>"))
+            cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, @"<think>[\s\S]*", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
+
+        cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, @"^(?:Translation|Russian|English|Chinese|Simplified Chinese|Result|Output|Перевод|Русский перевод|中文翻译|翻译结果)\s*[:：]\s*", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
+        cleaned = cleaned.Trim('"', '\'', '`', '«', '»', '“', '”').Trim();
+
+        return cleaned;
+    }
+
+    private static async Task<string> TranslateViaGoogleAsync(string text, string direction, CancellationToken ct)
+    {
+        string src = direction.Split("->")[0];
+        string tgt = direction.Split("->")[1];
+        if (tgt == "en-us" || tgt == "en-gb") tgt = "en";
+
+        string url = "https://translate-pa.googleapis.com/v1/translate?params.client=gtx&dataTypes=TRANSLATION&key=AIzaSyDLEeFI5OtFBwYBIoK_jj5m32rZK5CkCXA&query.sourceLanguage="
+            + Uri.EscapeDataString(src) + "&query.targetLanguage=" + Uri.EscapeDataString(tgt) + "&query.text=" + Uri.EscapeDataString(text);
+
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+        var response = await client.GetAsync(url, ct);
+        response.EnsureSuccessStatusCode();
+
+        string jsonStr = await response.Content.ReadAsStringAsync(ct);
+        var doc = JsonNode.Parse(jsonStr);
+        string? translation = doc?["translation"]?.GetValue<string>();
+        return translation ?? "";
+    }
+
 }
