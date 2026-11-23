@@ -466,7 +466,7 @@ public partial class Form1 : Form
 
         _btnToggleSidePanel = new Button
         {
-            Text = "◀ Быстрый перевод",
+            Text = "◀ Ручной перевод",
             Font = new Font("Segoe UI", 8.8f, FontStyle.Bold),
             BackColor = Color.FromArgb(55, 60, 68),
             ForeColor = Color.White,
@@ -2622,7 +2622,7 @@ del ""{tempNewExe}"" >nul 2>&1
         // Header: Title + Close Button
         _lblSideTitle = new Label
         {
-            Text = "📝 Быстрый перевод",
+            Text = "📝 Ручной перевод",
             Font = new Font("Segoe UI", 11.5f, FontStyle.Bold),
             ForeColor = Color.White,
             Location = new Point(14, 12),
@@ -3088,7 +3088,7 @@ del ""{tempNewExe}"" >nul 2>&1
             _isSidePanelOpen = true;
 
             UpdateSidePanelTexts();
-            _btnToggleSidePanel.Text = _currentLang switch { "zh" => "▶ 隐藏翻译器", "en" => "▶ Hide Translator", _ => "▶ Скрыть переводчик" };
+            _btnToggleSidePanel.Text = _currentLang switch { "zh" => "▶ 隐藏面板", "en" => "▶ Hide Manual", _ => "▶ Скрыть переводчик" };
             _btnToggleSidePanel.BackColor = Color.FromArgb(79, 70, 229);
 
             this.ResumeLayout(true);
@@ -3140,7 +3140,7 @@ del ""{tempNewExe}"" >nul 2>&1
             targetLeft = screen.Left;
         this.Left = targetLeft;
 
-        _btnToggleSidePanel.Text = _currentLang switch { "zh" => "◀ 快速翻译", "en" => "◀ Quick Translate", _ => "◀ Быстрый перевод" };
+        _btnToggleSidePanel.Text = _currentLang switch { "zh" => "◀ 手动翻译", "en" => "◀ Manual Translate", _ => "◀ Ручной перевод" };
         _btnToggleSidePanel.BackColor = Color.FromArgb(55, 60, 68);
 
         this.ResumeLayout(true);
@@ -3161,10 +3161,10 @@ del ""{tempNewExe}"" >nul 2>&1
         bool zh = _currentLang == "zh";
 
         _btnToggleSidePanel.Text = _isSidePanelOpen ?
-            (ru ? "▶ Скрыть переводчик" : zh ? "▶ 隐藏翻译器" : "▶ Hide Translator") :
-            (ru ? "◀ Быстрый перевод" : zh ? "◀ 快速翻译" : "◀ Quick Translate");
+            (ru ? "▶ Скрыть переводчик" : zh ? "▶ 隐藏面板" : "▶ Hide Manual") :
+            (ru ? "◀ Ручной перевод" : zh ? "◀ 手动翻译" : "◀ Manual Translate");
 
-        _lblSideTitle.Text = ru ? "📝 Быстрый перевод" : zh ? "📝 快速翻译" : "📝 Quick Translate";
+        _lblSideTitle.Text = ru ? "📝 Ручной перевод" : zh ? "📝 手动翻译" : "📝 Manual Translate";
         _btnSidePaste.Text = ru ? "📋 Вставить" : zh ? "📋 粘贴" : "📋 Paste";
         _btnSideClear.Text = ru ? "✕ Очистить" : zh ? "✕ 清空" : "✕ Clear";
         _btnSideTranslate.Text = ru ? "⚡ Перевести (Ctrl+Enter)" : zh ? "⚡ 翻译 (Ctrl+Enter)" : "⚡ Translate (Ctrl+Enter)";
